@@ -10,6 +10,10 @@
 
 已登记的未结束航次可**改期**：侧栏选取航次、输入新起飞时刻并携带**所见原时刻**提交。服务端保留航次编号、登记时间与原发布号，仅替换**该航次自己保存的航线快照**中的起飞时刻，用**当前已核准禁飞区**重新审查——即使已有新发布，也沿用原航次的航线几何。航次不存在或已结束、原时刻已被他页改动（乐观并发）、输入无效、审查报错或有冲突时返回原因及相应明细，**原时刻与快照不变**；通过时在单个事务内**原子更新同一航次**的时刻与快照。改期、结束与禁飞区核准交错时，核准事务始终读到**最终生效的未结束航次**复核，不漏检。页面展示更新结果并保留被拒的输入。
 
+每个未结束航次都有一张**航段空域占用表**：`GET /api/voyages/<id>/occupancy`（侧栏航次卡片「占用」按钮同样打开）按**该航次自己保存的航线快照**逐段给出①**扫掠走廊**（与禁飞区审查同一口径的 round-cap 缓冲多边形，GeoJSON）、②**端点高度范围**（航段两端高度的最小/最大值）、③**进入至离开时段**（由起飞时刻与逐段距离/速度推出的 ETA）；该时段内该航次**视为占用整段走廊**。旧发布登记的航次在新发布后仍按**自身快照**显示；改期后占用时段随之重算；**结束航次即释放占用**，占用查询返回 `409 voyage_ended`，已结束航次记录本身仍可通过航次列表查询。侧栏按航次查看时把占用走廊叠加到画布，并可一键缩放到占用范围。
+
+**登记与改期的共占核对**：原禁飞区审查通过后，须在**同一写事务**内把候选航段与全部其他未结束航次逐段核对（改期跳过自身）——两段**扫掠走廊相交**（边界擦碰也算）∩ **端点高度范围重合**（高度层恰好擦到也算）∩ **占用时段存在正长度交集**，三者同时成立即**共占**；**首尾相接**（一方离开时刻恰为另一方进入时刻，零长度交集）允许。共占时返回 `409 occupancy_conflict`，逐条给出**对方航次编号**（及其发布号/起飞时刻）、**双方航段**（本航段/对方航段序号）与**重叠时段**及分钟数，**整次拒绝且原记录不变**（登记不留新航次、改期不改原时刻与快照、工作区与发布不动）；候选与多个航次或同一航次多个航段共占时逐段全部报出。并发的登记、改期、结束都在单个 `BEGIN IMMEDIATE` 写事务内执行，SQLite 写锁串行使后提交者必然读到先提交者的最终占用集合，**不漏检**：同时刻并发登记两条相同航次恰有一条成功；并发改期与结束时，结束先提交则占用释放改期通过，改期先拿到写锁则对方仍在占用集合中、必被共占检出。侧栏在登记表单上方/改期卡片中展示被拒的共占明细并**保留改期输入**。既有发布、禁飞区核准与航次调用全部继续可用。
+
 为避免多页面互相覆盖，已发布后的航线自动保存会在 `PUT /api/state` 请求头携带所见修订号（`X-Expected-Workspace-Rev`）。他页已先变更时本次保存收到 `409 stale` 且**不写库**，页面取回服务器最新工作区后按三种情况分流，**本页未保存航线、禁飞区草稿与服务器最新航线三者始终同时保留**：
 
 1. **本页航线相对编辑前所见未改**（本页没有待保存的航线改动）：直接采用服务器最新航线与他页已核准禁飞区，不再写库；本页禁飞区草稿保留。
@@ -78,6 +82,24 @@ python app.py          # 同样监听 http://localhost:8000
 
 每条结果的 `enterFrac、exitFrac、enterTime、exitTime、altLow/altHigh、witness` 都取自**同一段最终冲突**；时窗截短区间时，见证点随实际进入时刻移动到被截短区间的进入端中心线位置。多部件相交会输出多条互不合并的结果，结果按实际进入时刻排序，**首个冲突取最早进入的一段**，画布以红色★标出。
 
+### 航段空域占用与航次共占
+
+未结束航次按其**自身航线快照**逐段占用空域，每段占用要素：
+
+- **扫掠走廊**：航段折线按走廊半宽的 round-cap/round-join 缓冲多边形（与禁飞区审查同一几何口径）；
+- **端点高度范围**：`[min(起点高度, 终点高度), max(起点高度, 终点高度)]`（m）——不沿航段细分高度子区间，整段走廊在该高度范围内视为占用；
+- **进入至离开时段**：`[航段起点 ETA, 航段终点 ETA]`，由起飞时刻与逐段 `距离/速度` 推出；时段内该航次**视为占用整段走廊**。
+
+两个未结束航次的两段航段**共占**当且仅当三维同时成立：
+
+1. **平面**：两段扫掠走廊相交（`shapely` 真实缓冲区相交，边界线接触/点擦碰都算）；
+2. **高度**：两端点高度范围闭区间重合（`[a,b]∩[c,d]` 非空，端点恰好相等也算）；
+3. **时间**：两段占用时段存在**正长度**交集，即 `max(进入) < min(离开)`；`max(进入) == min(离开)` 是**首尾相接**，零长度交集，允许。
+
+共占逐条报告对方航次编号（`voyageId`/`releaseSeq`/`departureTime`）、双方航段（`selfSegIndex`/`otherSegIndex`）与重叠时段 `[overlapStart, overlapEnd]`（`durationMinutes`）。已结束航次不参与核对（占用随结束释放）。
+
+> 注意：与禁飞区冲突口径不同，共占的高度与时段按**整段走廊 + 整段占用时段**判定（不做航段内部子区间裁剪）：只要两走廊平面相交、高度层在端点范围内有重合、且两者在该走廊上的停留时段有正长度重叠，即视为共占。
+
 > 注意：走廊缓冲采用 round 端帽，航段衔接处为圆弧过渡；冲突线段在画布上沿中心线绘制，宽度等于走廊宽，仅供定位参考，**计算以 shapely 的真实缓冲区相交为准**。
 
 
@@ -96,6 +118,7 @@ python app.py          # 同样监听 http://localhost:8000
 | 禁飞区变更核准 | 已有发布时，禁飞区编辑先存为草稿（不落库）；侧栏「提交核准」与发布快照航线组合审查，通过才替换工作区禁飞区；「放弃草稿」还原为已核准内容 |
 | 航次登记 | 侧栏「航次登记」输入起飞时刻，按当前发布号登记；服务端以发布快照航线替换起飞时刻、与已核准禁飞区重审，安全才落库；航次列表可查询、执行中点「结束航次」 |
 | 航次改期 | 航次列表对执行中航次点「改期」，输入新起飞时刻提交（携带所见原时刻）；服务端仅替换该航次航线快照中的起飞时刻、与当前已核准禁飞区重审，通过才原子更新；被拒时原因与明细展示、输入保留 |
+| 航段占用 | 航次卡片点「占用」：按该航次自身快照逐段查看扫掠走廊、端点高度范围与进入→离开时段，占用走廊叠加到画布；旧发布航次仍按自身快照；结束航次后占用释放（409） |
 | 双页航线冲突 | 两页各改航线、后保存方撞 409 时自动保存暂停：侧栏顶部对比双方航线，可选「加载服务器航线」（草稿保留）或「确认提交本页航线」（最新修订号条件写入，再撞 409 仍保留并重新提示） |
 
 首次启动会写入一条演示数据（4 个航点、3 个禁飞区，含平面+高度+时窗命中、高度不命中、时窗不命中三种样例）。
@@ -114,9 +137,10 @@ python app.py          # 同样监听 http://localhost:8000
 | POST | `/api/release` | 发布航线 `{versionId, workspaceRev, releaseSeq}`，见下文示例 |
 | POST | `/api/nfz-approval` | 已发布航线的禁飞区变更核准 `{nfzs, workspaceRev, releaseSeq}`，见下文示例；除最新发布航线审查外还复核所有未结束航次 |
 | GET | `/api/voyages` | 全部航次（新登记在前）：航次编号、发布号、起飞时刻、航线快照 `routeSnapshot`、结束时刻 `endedAt` 与是否未结束 `open` |
-| POST | `/api/voyages` | 登记航次 `{releaseSeq, departureTime}`，见下文示例 |
-| POST | `/api/voyages/<id>/reschedule` | 航次改期 `{departureTime, originalDepartureTime}`，见下文示例 |
-| POST | `/api/voyages/<id>/end` | 结束航次（幂等；不存在 → 404）；结束后不再阻拦禁飞区核准 |
+| POST | `/api/voyages` | 登记航次 `{releaseSeq, departureTime}`，见下文示例；禁飞区审查后还在同一写事务内与全部未结束航次核对共占，共占 → 409 `occupancy_conflict`（附对方航次/双方航段/重叠时段）且不留记录 |
+| POST | `/api/voyages/<id>/reschedule` | 航次改期 `{departureTime, originalDepartureTime}`，见下文示例；同一写事务内与**其他**未结束航次（跳过自身）核对共占，共占 → 409 `occupancy_conflict` 且原时刻/快照不变 |
+| POST | `/api/voyages/<id>/end` | 结束航次（幂等；不存在 → 404）；结束后不再阻拦禁飞区核准、不参与共占，占用即释放 |
+| GET | `/api/voyages/<id>/occupancy` | 航段空域占用表：按该航次自身航线快照逐段返回扫掠走廊（GeoJSON `corridor` + `centerline`）、端点高度范围 `altLow/altHigh`、进入至离开时段 `enterTime/leaveTime`（另含 `durationMinutes/distanceKm/halfWidthKm`）；不存在 → 404，已结束 → 409 `voyage_ended`（占用已释放） |
 
 ### 发布航线（POST /api/release）
 
@@ -154,7 +178,7 @@ python app.py          # 同样监听 http://localhost:8000
 
 ### 航次登记（POST /api/voyages）与结束（POST /api/voyages/&lt;id&gt;/end）
 
-请求体：`releaseSeq`（当前发布号，整数）、`departureTime`（起飞时刻字符串）。服务端在**单个事务**内：核对发布号即当前最新发布（无发布 / 号已变直接拒绝）→ 取该发布**快照航线**并仅把起飞时刻替换为提交值 → 与**当前工作区已核准禁飞区**组合审查。任一环节失败都整体回滚，**不留航次记录、不改工作区与发布快照**：
+请求体：`releaseSeq`（当前发布号，整数）、`departureTime`（起飞时刻字符串）。服务端在**单个事务**内：核对发布号即当前最新发布（无发布 / 号已变直接拒绝）→ 取该发布**快照航线**并仅把起飞时刻替换为提交值 → 与**当前工作区已核准禁飞区**组合审查 → **原审查通过后，与全部未结束航次逐段核对共占**（走廊相交 ∩ 高度重合 ∩ 时段正长度交集，首尾相接允许）。任一环节失败都整体回滚，**不留航次记录、不改工作区与发布快照**：
 
 | 情形 | 状态码 | 响应 `reason` | 说明 |
 |---|---|---|---|
@@ -164,15 +188,32 @@ python app.py          # 同样监听 http://localhost:8000
 | 提交的发布号已非当前发布号 | 409 | `stale` | `details.releaseSeq` 附 `{expected, actual}` |
 | 审查存在错误 | 400 | `analysis_errors` | `errors` 附错误列表 |
 | 与已核准禁飞区冲突 | 409 | `analysis_conflicts` | `entries`/`first` 附冲突明细 |
+| 与未结束航次共占 | 409 | `occupancy_conflict` | `occupancyConflicts` 逐条附对方航次编号、双方航段、重叠时段；不留航次记录 |
 | 通过 | 200 | — | `{ok, voyage}`：落库航次，`voyage` 含 `id`（航次编号）、`releaseSeq`、`departureTime`、`routeSnapshot`（替换了起飞时刻的航线快照）、`createdAt`、`endedAt`（未结束为 `null`）、`open: true` |
 
-`GET /api/voyages` 返回 `{ok, voyages:[...]}`（新登记在前），已结束航次 `open:false` 并带 `endedAt`。`POST /api/voyages/<id>/end` 幂等结束航次（重复调用不改变首次结束时刻），结束后该航次不再参与核准复核；航次不存在返回 `404 {"reason":"voyage_not_found"}`。
+`GET /api/voyages` 返回 `{ok, voyages:[...]}`（新登记在前），已结束航次 `open:false` 并带 `endedAt`。`POST /api/voyages/<id>/end` 幂等结束航次（重复调用不改变首次结束时刻），结束后该航次不再参与核准复核与共占核对、占用即释放；航次不存在返回 `404 {"reason":"voyage_not_found"}`。
 
-要点：登记审查用的是**发布快照航线的几何 + 新起飞时刻**——即使同一航线在发布时刻安全，换一个起飞时刻可能落入某已核准禁飞区的生效窗而被拒；登记时工作区航线是什么无关。登记不改变工作区修订号与发布号。新发布出现后，旧航次仍按其自身的发布快照与登记时刻复核，直到被结束。
+要点：登记审查用的是**发布快照航线的几何 + 新起飞时刻**——即使同一航线在发布时刻安全，换一个起飞时刻可能落入某已核准禁飞区的生效窗而被拒；登记时工作区航线是什么无关。登记不改变工作区修订号与发布号。新发布出现后，旧航次仍按其自身的发布快照与登记时刻复核与参与共占，直到被结束。
+
+### 航段空域占用查询（GET /api/voyages/&lt;id&gt;/occupancy）
+
+按**该航次自己保存的航线快照**逐段计算占用，返回 `{ok, voyageId, releaseSeq, departureTime, open, errors, segments}`。每个 `segments[i]`：
+
+| 字段 | 含义 |
+|---|---|
+| `segIndex` | 航段序号（从 0 起，与审查结果一致；零长度/数据不完整航段不输出） |
+| `corridor` | 扫掠走廊 GeoJSON `Polygon`（round-cap 缓冲，画布平面坐标） |
+| `centerline` | 航段中心线 GeoJSON `LineString`，便于画布定位 |
+| `halfWidthKm` / `distanceKm` | 走廊半宽（km）/ 航段长度（km，画布距离 ÷ 画布比例） |
+| `altLow` / `altHigh` | 端点高度范围（m）：两端高度的最小/最大值 |
+| `enterTime` / `leaveTime` | 进入至离开时段（航段起终点 ETA，`YYYY-MM-DDTHH:MM`） |
+| `durationMinutes` | 占用时长（分钟） |
+
+航次不存在 → `404 {"reason":"voyage_not_found"}`；航次已结束 → `409 {"reason":"voyage_ended","voyage":{...}}`，表示占用已随结束释放（响应仍附该航次记录）。旧发布航次在新发布后仍按自身快照返回；改期后再次查询得到新时段。
 
 ### 航次改期（POST /api/voyages/&lt;id&gt;/reschedule）
 
-请求体：`departureTime`（新起飞时刻字符串）、`originalDepartureTime`（页面所见原时刻，用于乐观并发）。服务端在**单个事务**内：核对航次存在且未结束 → 所见原时刻与库中保存值一致 → 取**该航次自己保存的航线快照**并仅把起飞时刻替换为新值（几何/速度/走廊等不动，即使已有新发布也沿用原航次航线）→ 与**当前工作区已核准禁飞区**组合审查。任一环节失败都整体回滚，**原时刻与快照不变**：
+请求体：`departureTime`（新起飞时刻字符串）、`originalDepartureTime`（页面所见原时刻，用于乐观并发）。服务端在**单个事务**内：核对航次存在且未结束 → 所见原时刻与库中保存值一致 → 取**该航次自己保存的航线快照**并仅把起飞时刻替换为新值（几何/速度/走廊等不动，即使已有新发布也沿用原航次航线）→ 与**当前工作区已核准禁飞区**组合审查 → **原审查通过后，与其他未结束航次（跳过自身）逐段核对共占**。任一环节失败都整体回滚，**原时刻与快照不变**：
 
 | 情形 | 状态码 | 响应 `reason` | 说明 |
 |---|---|---|---|
@@ -183,11 +224,24 @@ python app.py          # 同样监听 http://localhost:8000
 | 原时刻已被他页改动 | 409 | `stale` | `details.departureTime` 附 `{expected, actual}`；原时刻无法解析视同不一致 |
 | 审查存在错误 | 400 | `analysis_errors` | `errors` 附错误列表 |
 | 与已核准禁飞区冲突 | 409 | `analysis_conflicts` | `entries`/`first` 附冲突明细 |
+| 与其他未结束航次共占 | 409 | `occupancy_conflict` | `occupancyConflicts` 逐条附对方航次编号、双方航段、重叠时段；原时刻与快照不变 |
 | 通过 | 200 | — | `{ok, voyage}`：原子更新同一航次的 `departureTime` 与 `routeSnapshot`，`id`/`createdAt`/`releaseSeq` 不变 |
 
-改期不校验当前发布号（旧发布航次可改期），也不改变工作区修订号与发布号。改期、结束与禁飞区核准交错时，三者均在 `BEGIN IMMEDIATE` 事务内串行：核准读到的是**最终生效的未结束航次**（含改期后的新时刻），改期与结束也总是看到最新已核准禁飞区，不会漏检。页面上被拒的输入保留在改期表单中，`stale` 时同步最新航次列表后以最新原时刻为基线重提。
+改期不校验当前发布号（旧发布航次可改期），也不改变工作区修订号与发布号。改期、结束、登记与禁飞区核准交错时，均在 `BEGIN IMMEDIATE` 事务内串行：核准读到的是**最终生效的未结束航次**（含改期后的新时刻），改期/登记也总是看到最新已核准禁飞区与**当时全部未结束航次**，不会漏检。页面上被拒的输入与共占明细保留在改期表单中，`stale` 时同步最新航次列表后以最新原时刻为基线重提。
+
+`occupancyConflicts` 每条形如：
+
+```json
+{"voyageId": 1, "releaseSeq": 1, "departureTime": "2026-10-08T08:00",
+ "selfSegIndex": 0, "otherSegIndex": 0,
+ "overlapStart": "2026-10-08T08:05", "overlapEnd": "2026-10-08T08:10",
+ "durationMinutes": 5.0}
+```
+
+`selfSegIndex` 为候选（登记）/本航次（改期）航段，`otherSegIndex` 为对方航次航段；与多个航次或多个航段共占时逐段全部列出（按对方航次/航段排序）。
 
 ### 可执行示例（端口 8000）
+
 
 服务启动后（`docker compose up --build` 或 `python app.py`），依次执行：
 
@@ -290,11 +344,74 @@ curl -s -X POST http://localhost:8000/api/voyages/1/reschedule \
 #   / 409 {"reason":"no_release"}
 ```
 
+### 占用查询与共占拒绝示例（端口 8000）
+
+下面这段自成一体：发布一条 4km 水平航线（速度 24 km/h，每段恰好飞 10 分钟），登记一个 08:00 航次，然后查询占用、尝试共占登记、首尾相接登记。
+
+```bash
+# ① 清空禁飞区的工作区，记下 rev
+curl -s -X PUT http://localhost:8000/api/state -H 'Content-Type: application/json' \
+  -d '{"route":{"waypoints":[]},"nfzs":[]}'
+# → {"ok":true,"rev":2}
+
+# ② 保存版本（4km 水平航线，200m 等高，24km/h → 每段 10 分钟）
+curl -s -X POST http://localhost:8000/api/versions -H 'Content-Type: application/json' \
+  -d '{"name":"占用演示","state":{"route":{"departureTime":"2026-10-08T08:00","unitScale":100,"corridorHalfWidth":0.3,"speeds":[24],"waypoints":[{"id":"w1","x":100,"y":100,"alt":200},{"id":"w2","x":500,"y":100,"alt":200}]},"nfzs":[]}}'
+# → {"ok":true,"id":1,...}
+
+# ③ 发布（versionId=1，workspaceRev 用①的值，首次 releaseSeq=0）
+curl -s -X POST http://localhost:8000/api/release -H 'Content-Type: application/json' \
+  -d '{"versionId":1,"workspaceRev":2,"releaseSeq":0}'
+# → {"ok":true,"release":{"seq":1,...}}
+
+# ④ 登记航次 #1：08:00 起飞 → 占用 [08:00,08:10]
+curl -s -X POST http://localhost:8000/api/voyages -H 'Content-Type: application/json' \
+  -d '{"releaseSeq":1,"departureTime":"2026-10-08T08:00"}'
+# → {"ok":true,"voyage":{"id":1,...,"open":true}}
+
+# ⑤ 查询航次 #1 的航段空域占用表（按其自身航线快照）
+curl -s http://localhost:8000/api/voyages/1/occupancy
+# → {"ok":true,"voyageId":1,"releaseSeq":1,"departureTime":"2026-10-08T08:00","open":true,
+#    "errors":[],
+#    "segments":[{"segIndex":0,
+#      "corridor":{"type":"Polygon","coordinates":[[[70,70],[70,130],...[530,130],[530,70],...]]},
+#      "centerline":{"type":"LineString","coordinates":[[100,100],[500,100]]},
+#      "halfWidthKm":0.3,"distanceKm":4.0,
+#      "altLow":200.0,"altHigh":200.0,
+#      "enterTime":"2026-10-08T08:00","leaveTime":"2026-10-08T08:10",
+#      "durationMinutes":10.0}]}
+
+# ⑥ 08:05 再登记一条同走廊航次：时段 [08:05,08:15] 与 [08:00,08:10] 正长度交集
+#    → 409 共占，附对方航次编号、双方航段与重叠时段；整次拒绝、不留记录
+curl -s -X POST http://localhost:8000/api/voyages -H 'Content-Type: application/json' \
+  -d '{"releaseSeq":1,"departureTime":"2026-10-08T08:05"}'
+# → 409 {"ok":false,"reason":"occupancy_conflict",
+#    "error":"与未结束航次 #1 共 1 段空域共占，航次登记整次被拒绝且原记录不变",
+#    "occupancyConflicts":[{"voyageId":1,"releaseSeq":1,"departureTime":"2026-10-08T08:00",
+#      "selfSegIndex":0,"otherSegIndex":0,
+#      "overlapStart":"2026-10-08T08:05","overlapEnd":"2026-10-08T08:10",
+#      "durationMinutes":5.0}]}
+curl -s http://localhost:8000/api/voyages   # 列表仍只有航次 #1
+
+# ⑦ 首尾相接允许：08:10 起飞（进入时刻恰为对方离开时刻，零长度交集）→ 通过
+curl -s -X POST http://localhost:8000/api/voyages -H 'Content-Type: application/json' \
+  -d '{"releaseSeq":1,"departureTime":"2026-10-08T08:10"}'
+# → {"ok":true,"voyage":{"id":2,...}}
+
+# ⑧ 结束航次 #1 → 占用释放：占用查询返回 409，且不再参与共占核对
+curl -s -X POST http://localhost:8000/api/voyages/1/end
+curl -s -i http://localhost:8000/api/voyages/1/occupancy | head -1
+# → HTTP/1.1 409 ...
+# {"ok":false,"reason":"voyage_ended","error":"航次 1 已结束，航段占用已随结束释放","voyage":{...}}
+```
+
+改期的共占拒绝同理：`POST /api/voyages/<id>/reschedule` 在原禁飞区审查通过后与**其他**未结束航次（跳过自身）逐段核对，命中返回同一 `409 occupancy_conflict`（`selfSegIndex` 为本航次航段），**原时刻与航线快照不变**；结束对方航次后以相同入参重提即通过。侧栏「占用」按钮与该 HTTP 接口返回一致，被拒明细显示在登记/改期面板，改期输入保留。
+
 > 提示：工作区再被编辑后 `workspaceRev` 会变化、每次成功发布后 `releaseSeq` 会递增；用旧值重新发布或提交核准会得到 `409 {"reason":"stale","details":...}`，先 `GET /api/release` 取最新两个号再重试即可。
 
 ## 回归测试
 
-判定口径（含凹形禁飞区空隙误报、多部件两段命中、时窗截短见证点移动、线/点/时窗端点擦碰）由 `tests/test_analyze.py` 覆盖；发布航线（组合审查、递增发布号、乐观并发、失败回滚、发布不可变）由 `tests/test_release.py` 覆盖；禁飞区变更核准（发布快照航线组合审查、仅替换工作区禁飞区、乐观并发、失败不改写）由 `tests/test_nfz_approval.py` 覆盖；**航次登记/结束与核准对航次的复核**（快照航线替换起飞时刻后与已核准禁飞区重审、无发布/号变/时刻无效/报错/冲突均拒绝不留记录、航次快照与列表、结束幂等与 404、未结束航次——含旧发布航次——阻拦核准并逐航次附冲突明细、结束后放行、登记与核准交错不漏检）由 `tests/test_voyages.py` 覆盖；**航次改期**（保留编号/登记时间/原发布号、仅替换该航次快照起飞时刻并与当前已核准禁飞区重审、已有新发布仍沿用原航次航线几何、不存在/已结束/原时刻被改动/输入无效/报错/冲突均拒绝且原时刻与快照不变、改期-结束-核准交错按最终生效的未结束航次复核不漏检）由 `tests/test_voyage_reschedule.py` 覆盖；页面提交（核准不预存工作区、相邻保存与核准的修订号协调、条件 PUT 409 合流）与**双页面交错**（他页核准后本页保存不得覆盖已核准禁飞区、**两页各改航线时后保存方 409 后不得换新号整份覆盖、双方航线并列可选、加载远端保留禁飞区草稿、确认提交用最新修订号条件写入且再撞 409 仍保留本页编辑**、在途保存与核准相邻时未解决冲突不得继续核准、发布号变化拒绝、快照不动）以及**启动请求交错**（`GET /api/state → GET /api/release` 期间他页改航线/核准禁飞区并推进修订号：协调再读失败时不得用新修订号把旧航线/旧禁飞区整份写回、保留草稿并阻断自动保存及相邻核准/发布、重试取回后三分支分流——远端未变按最新修订号条件保存、仅他页改航线直接采用远端不写库、双方都改才进冲突选择；另含“新号配旧内容会被服务端 200 接受”的危害固定用例）由 `tests/test_workspace_concurrency.py` 覆盖，均仅用标准库 `unittest`：
+判定口径（含凹形禁飞区空隙误报、多部件两段命中、时窗截短见证点移动、线/点/时窗端点擦碰）由 `tests/test_analyze.py` 覆盖；发布航线（组合审查、递增发布号、乐观并发、失败回滚、发布不可变）由 `tests/test_release.py` 覆盖；禁飞区变更核准（发布快照航线组合审查、仅替换工作区禁飞区、乐观并发、失败不改写）由 `tests/test_nfz_approval.py` 覆盖；**航次登记/结束与核准对航次的复核**（快照航线替换起飞时刻后与已核准禁飞区重审、无发布/号变/时刻无效/报错/冲突均拒绝不留记录、航次快照与列表、结束幂等与 404、未结束航次——含旧发布航次——阻拦核准并逐航次附冲突明细、结束后放行、登记与核准交错不漏检）由 `tests/test_voyages.py` 覆盖；**航次改期**（保留编号/登记时间/原发布号、仅替换该航次快照起飞时刻并与当前已核准禁飞区重审、已有新发布仍沿用原航次航线几何、不存在/已结束/原时刻被改动/输入无效/报错/冲突均拒绝且原时刻与快照不变、改期-结束-核准交错按最终生效的未结束航次复核不漏检）由 `tests/test_voyage_reschedule.py` 覆盖；**航段空域占用表与航次共占核对**（按航次自身快照逐段给出扫掠走廊 GeoJSON/端点高度范围/进入至离开时段、旧发布航次仍按自身快照、改期后时段重算、结束即释放 409、不存在 404；共占 = 走廊相交 ∩ 高度范围重合 ∩ 占用时段正长度交集，平面不相交/高度不重合/首尾相接均放行，高度端点相接算重合；登记共占 409 `occupancy_conflict` 附对方航次/双方航段/重叠时段且不留记录、改期跳过自身共占拒绝原时刻与快照不变、结束对方后同入参通过、多航次多航段逐段报出、并发登记恰一成一败、并发改期/结束按写锁顺序不漏检）由 `tests/test_voyage_occupancy.py` 覆盖；页面提交（核准不预存工作区、相邻保存与核准的修订号协调、条件 PUT 409 合流）与**双页面交错**（他页核准后本页保存不得覆盖已核准禁飞区、**两页各改航线时后保存方 409 后不得换新号整份覆盖、双方航线并列可选、加载远端保留禁飞区草稿、确认提交用最新修订号条件写入且再撞 409 仍保留本页编辑**、在途保存与核准相邻时未解决冲突不得继续核准、发布号变化拒绝、快照不动）以及**启动请求交错**（`GET /api/state → GET /api/release` 期间他页改航线/核准禁飞区并推进修订号：协调再读失败时不得用新修订号把旧航线/旧禁飞区整份写回、保留草稿并阻断自动保存及相邻核准/发布、重试取回后三分支分流——远端未变按最新修订号条件保存、仅他页改航线直接采用远端不写库、双方都改才进冲突选择；另含“新号配旧内容会被服务端 200 接受”的危害固定用例）由 `tests/test_workspace_concurrency.py` 覆盖，均仅用标准库 `unittest`：
 
 ```bash
 python3 -m unittest discover -s tests        # 需已 pip install -r requirements.txt
@@ -303,15 +420,16 @@ python3 -m unittest discover -s tests        # 需已 pip install -r requirement
 ## 目录结构
 
 ```
-app.py                 # Flask 后端：SQLite、时窗/高度/平面冲突计算（Shapely）、发布航线、禁飞区变更核准、航次登记/改期/结束
+app.py                 # Flask 后端：SQLite、时窗/高度/平面冲突计算（Shapely）、发布航线、禁飞区变更核准、航次登记/改期/结束、航段占用表与航次共占核对
 tests/test_analyze.py  # 判定口径回归（凹形空隙、两段命中、时窗截断、擦碰）
 tests/test_release.py  # 发布航线回归（组合审查、并发回退、不可变性）
 tests/test_nfz_approval.py  # 禁飞区变更核准回归（快照航线审查、草稿提交、并发回退）
 tests/test_voyages.py   # 航次回归（快照换时刻登记、拒绝不留记录、未结束航次阻拦核准、结束放行、交错不漏检）
 tests/test_voyage_reschedule.py  # 航次改期回归（快照换时刻原子更新、原时刻乐观并发、拒绝不变、交错复核不漏检）
+tests/test_voyage_occupancy.py   # 航段占用表（快照走廊/高度范围/时段、旧发布与结束释放）与共占核对回归（走廊∩高度∩正长度时段、首尾相接放行、登记/改期整次拒绝原记录不变、并发登记/改期/结束不漏检）
 tests/test_workspace_concurrency.py  # 页面提交、双页面交错与启动请求交错回归（核准不预存、条件 PUT、修订号协调、协调失败阻断）
 templates/index.html   # 单页布局
-static/app.js          # 原生 JS：SVG 渲染、拖动、绘制、重算、版本、发布、禁飞区草稿、航次登记/改期
+static/app.js          # 原生 JS：SVG 渲染、拖动、绘制、重算、版本、发布、禁飞区草稿、航次登记/改期/占用
 static/style.css       # 样式
 Dockerfile             # python:3.12-slim + gunicorn
 docker-compose.yml     # 一条命令启动，端口 8000，卷持久化

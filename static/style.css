@@ -53,6 +53,14 @@ body { display: flex; flex-direction: column; background: #0e1420; color: #d7e0e
 .nfz-vertex { fill: #ffd166; stroke: #7a5a00; stroke-width: 1; cursor: grab; }
 .nfz-label { fill: #c8d6ec; font-size: 11px; pointer-events: none; }
 .conflict-overlay { fill: rgba(255,77,109,.22); stroke: #ff4d6d; stroke-width: 1.5; }
+.occupancy-corridor {
+  fill: rgba(127,216,255,.13); stroke: #7fd8ff; stroke-width: 2;
+  stroke-dasharray: 7 4; pointer-events: none;
+}
+.occupancy-label { fill: #bfe9ff; font-size: 12px; font-weight: 700; pointer-events: none;
+  paint-order: stroke; stroke: #0e1420; stroke-width: 3px; stroke-linejoin: round; }
+.occupancy-label-alt { fill: #8fc7e8; font-size: 10px; pointer-events: none;
+  paint-order: stroke; stroke: #0e1420; stroke-width: 3px; stroke-linejoin: round; }
 .witness { fill: #ff4d6d; stroke: #fff; stroke-width: 1.5; }
 .witness-ring { fill: none; stroke: #ff4d6d; stroke-width: 2; }
 .witness-label { fill: #ffb3c1; font-size: 11px; pointer-events: none; }

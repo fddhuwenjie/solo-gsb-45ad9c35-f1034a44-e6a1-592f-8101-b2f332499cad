@@ -24,7 +24,7 @@ app = Flask(__name__, static_folder="static", static_url_path="/static")
 # ---------------------------------------------------------------- 数据库
 def get_db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH)
+        g.db = sqlite3.connect(DB_PATH, timeout=30.0)
         g.db.row_factory = sqlite3.Row
         g.db.execute("PRAGMA journal_mode=WAL")
         g.db.execute(PRAGMA_FOREIGN_KEYS)
@@ -543,6 +543,173 @@ def analyze(state):
             "entries": entries, "first": first}
 
 
+# ---------------------------------------------------------------- 航段空域占用
+def voyage_segments(route):
+    """按航次保存的航线快照逐段计算空域占用要素。
+
+    每段返回：扫掠走廊（shapely 缓冲多边形，画布平面坐标）、端点高度范围
+    [altLow, altHigh]（m，取两端高度的最小/最大）与进入至离开时段
+    [enter, leave]（起飞时刻 + 航段距离/速度 推出的 ETA）。时段内该航次
+    视为占用**整段走廊**（不区分航段内部子区间）。
+
+    航段编号与 analyze 一致：坐标/高度不完整、零长度航段记 None 占位；
+    速度无效时该段及其后航段时刻无法推算，时段为 None，不参与共占判定。
+    """
+    from datetime import timedelta
+    errors = []
+    route = route or {}
+    wps = route.get("waypoints") or []
+    speeds = route.get("speeds") or []
+    half_w = to_float(route.get("corridorHalfWidth"), 3.0)
+    if half_w <= 0:
+        errors.append({"scope": "route", "message": "走廊半宽必须为正数"})
+        half_w = 3.0
+    unit_scale = to_float(route.get("unitScale"), 100.0)
+    if unit_scale <= 0:
+        errors.append({"scope": "route", "message": "画布比例（单位/km）必须为正数"})
+        unit_scale = 100.0
+    dep = parse_dt(route.get("departureTime"))
+    times = [None] * len(wps)
+    if wps:
+        if dep is None:
+            errors.append({"scope": "route", "message": "起飞时刻缺失或格式错误"})
+        else:
+            times[0] = dep
+
+    segments = []
+    for k in range(max(0, len(wps) - 1)):
+        p0, p1 = wps[k], wps[k + 1]
+        x0, y0 = to_float(p0.get("x")), to_float(p0.get("y"))
+        x1, y1 = to_float(p1.get("x")), to_float(p1.get("y"))
+        a0, a1 = to_float(p0.get("alt")), to_float(p1.get("alt"))
+        if None in (x0, y0, x1, y1, a0, a1):
+            errors.append({"scope": f"seg{k}", "message": f"航段 {k + 1} 坐标/高度数据不完整"})
+            segments.append(None)
+            continue
+        d_px = math.hypot(x1 - x0, y1 - y0)
+        # ETA 递推（与 analyze 同一口径）：零长度航段不耗时
+        if times[k] is not None:
+            spd = to_float(speeds[k] if k < len(speeds) else None)
+            if spd is None or spd <= 0:
+                errors.append({"scope": f"seg{k}",
+                               "message": f"航段 {k + 1} 速度无效，后续时刻无法推算"})
+            elif d_px <= 0:
+                times[k + 1] = times[k]
+            else:
+                times[k + 1] = times[k] + timedelta(
+                    minutes=(d_px / unit_scale) / spd * 60.0)
+        if d_px <= 0:
+            segments.append(None)
+            continue
+        segments.append({
+            "segIndex": k,
+            "corridor": LineString([(x0, y0), (x1, y1)]).buffer(half_w * unit_scale),
+            "x0": x0, "y0": y0, "x1": x1, "y1": y1,
+            "halfWidthKm": half_w,
+            "distanceKm": round(d_px / unit_scale, 3),
+            "altLow": min(a0, a1),
+            "altHigh": max(a0, a1),
+            "enter": times[k],
+            "leave": times[k + 1],
+        })
+    return errors, segments
+
+
+def occupancy_segment_dict(seg):
+    """内部航段占用要素序列化为 API 响应（走廊转 GeoJSON，时刻转字符串）。"""
+    enter, leave = seg["enter"], seg["leave"]
+    return {
+        "segIndex": seg["segIndex"],
+        "corridor": seg["corridor"].__geo_interface__,
+        "centerline": {
+            "type": "LineString",
+            "coordinates": [[seg["x0"], seg["y0"]], [seg["x1"], seg["y1"]]],
+        },
+        "halfWidthKm": seg["halfWidthKm"],
+        "distanceKm": seg["distanceKm"],
+        "altLow": round(seg["altLow"], 2),
+        "altHigh": round(seg["altHigh"], 2),
+        "enterTime": fmt_dt(enter),
+        "leaveTime": fmt_dt(leave),
+        "durationMinutes": round((leave - enter).total_seconds() / 60.0, 2)
+        if enter is not None and leave is not None else None,
+    }
+
+
+def segment_co_occupy(a, b):
+    """两段走廊共占 → 返回 (重叠开始, 重叠结束)；否则 None。
+
+    三维同时成立才算共占：
+    - 平面：两段扫掠走廊相交（边界擦碰也算相交，与禁飞区判定同口径）；
+    - 高度：两端点高度范围闭区间重合（高度层恰好擦到也算）；
+    - 时间：占用时段存在**正长度**交集——首尾相接（一端离开时刻恰为
+      另一端进入时刻，零长度交集）允许，不判共占。
+    """
+    if a["enter"] is None or a["leave"] is None or b["enter"] is None or b["leave"] is None:
+        return None
+    if a["corridor"].disjoint(b["corridor"]):
+        return None
+    if a["altHigh"] < b["altLow"] or b["altHigh"] < a["altLow"]:
+        return None
+    start = max(a["enter"], b["enter"])
+    end = min(a["leave"], b["leave"])
+    if end <= start:  # 仅首尾相接：零长度交集，放行
+        return None
+    return start, end
+
+
+def occupancy_conflict_rows(db, candidate_segments, self_id=None):
+    """候选航线航段与全部未结束航次逐段核对共占（改期时 self_id 跳过自身）。
+
+    返回行：对方航次编号/发布号/起飞时刻、双方航段（selfSegIndex 为候选
+    或本航次航段，otherSegIndex 为对方航段）、正长度重叠时段。调用方须在
+    写事务内调用：BEGIN IMMEDIATE 串行保证并发登记/改期/结束不漏检。
+    """
+    rows = db.execute(
+        "SELECT * FROM voyages WHERE ended_at IS NULL ORDER BY id"
+    ).fetchall()
+    others = []
+    for row in rows:
+        if self_id is not None and row["id"] == self_id:
+            continue
+        _, segs = voyage_segments(json.loads(row["route_snapshot"]))
+        others.append((row, [s for s in segs if s is not None]))
+
+    out = []
+    for cand in candidate_segments:
+        if cand is None:
+            continue
+        for row, segs in others:
+            for ose in segs:
+                ov = segment_co_occupy(cand, ose)
+                if ov is None:
+                    continue
+                start, end = ov
+                out.append({
+                    "voyageId": row["id"],
+                    "releaseSeq": row["release_seq"],
+                    "departureTime": row["departure_time"],
+                    "selfSegIndex": cand["segIndex"],
+                    "otherSegIndex": ose["segIndex"],
+                    "overlapStart": fmt_dt(start),
+                    "overlapEnd": fmt_dt(end),
+                    "durationMinutes": round((end - start).total_seconds() / 60.0, 2),
+                })
+    out.sort(key=lambda c: (c["voyageId"], c["otherSegIndex"],
+                            c["selfSegIndex"], c["overlapStart"] or ""))
+    return out
+
+
+def reject_occupancy_conflicts(action, rows):
+    """共占拒绝响应：409 + 对方航次/双方航段/重叠时段明细，整次拒绝。"""
+    voyage_ids = sorted({r["voyageId"] for r in rows})
+    who = "、".join(f"#{i}" for i in voyage_ids)
+    return jsonify({"ok": False, "reason": "occupancy_conflict",
+                    "error": f"与未结束航次 {who} 共 {len(rows)} 段空域共占，"
+                             f"{action}整次被拒绝且原记录不变",
+                    "occupancyConflicts": rows}), 409
+
+
 # ---------------------------------------------------------------- 路由
 @app.get("/")
 def index():
@@ -755,7 +922,10 @@ def register_voyage():
     提交 {releaseSeq, departureTime}：以该发布快照中的航线替换起飞时刻后，
     与当前工作区已核准禁飞区重新审查；全部检查在单个 IMMEDIATE 事务内完成。
     无发布、发布号已变、时刻无效或审查报错/冲突时整体回滚，不留航次记录；
-    通过时原子落库航次编号、发布号、起飞时刻与航线快照（工作区与发布不变）。
+    原禁飞区审查通过后，还须在同一写事务内与全部未结束航次逐段核对共占
+    （走廊相交 ∩ 高度重合 ∩ 占用时段正长度交集，首尾相接允许），命中即附
+    对方航次编号、双方航段与重叠时段整次拒绝；通过时原子落库航次编号、
+    发布号、起飞时刻与航线快照（工作区与发布不变）。
     """
     body = request.get_json(force=True, silent=True) or {}
     try:
@@ -806,6 +976,20 @@ def register_voyage():
                             "entries": result["entries"],
                             "first": result["first"]}), 409
 
+        # 原禁飞区审查通过后，在同一写事务内与全部未结束航次逐段核对共占：
+        # 走廊相交 ∩ 高度重合 ∩ 占用时段正长度交集（首尾相接允许）。
+        # 命中即整次拒绝，不留航次记录。
+        occ_errors, occ_segments = voyage_segments(route)
+        if occ_errors:
+            db.rollback()
+            return jsonify({"ok": False, "reason": "analysis_errors",
+                            "error": "航段占用计算存在错误，航次未登记",
+                            "errors": occ_errors}), 400
+        co_rows = occupancy_conflict_rows(db, occ_segments)
+        if co_rows:
+            db.rollback()
+            return reject_occupancy_conflicts("航次登记", co_rows)
+
         created = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         cur = db.execute(
             "INSERT INTO voyages(release_seq,created_at,departure_time,route_snapshot)"
@@ -832,8 +1016,11 @@ def reschedule_voyage(voyage_id):
     新时刻无效、审查报错或冲突时整体回滚，原时刻与快照不变；通过时原子
     更新同一航次的起飞时刻与航线快照。审查用当前工作区已核准禁飞区；
     即使已有新发布，也沿用该航次自己保存的航线几何（快照仅换起飞时刻）。
-    改期与结束/核准交错时，SQLite 写事务串行使核准始终读到最终生效的
-    未结束航次，不漏检。
+    原禁飞区审查通过后还须在同一写事务内与**其他**未结束航次（跳过自身）
+    逐段核对共占，命中即整次拒绝、原记录不变。改期与结束/核准交错时，
+    SQLite 写事务串行使核准始终读到最终生效的未结束航次，不漏检；并发的
+    登记、改期、结束同样经 BEGIN IMMEDIATE 串行：结束先提交即释放占用，
+    先提交的登记/改期则在共占核对中被检出，不会漏检。
     """
     body = request.get_json(force=True, silent=True) or {}
     if "originalDepartureTime" not in body:
@@ -888,6 +1075,19 @@ def reschedule_voyage(voyage_id):
                             "entries": result["entries"],
                             "first": result["first"]}), 409
 
+        # 同一写事务内与其他未结束航次核对共占（self_id 跳过自身）；
+        # 命中即整次拒绝，原时刻与快照不变。
+        occ_errors, occ_segments = voyage_segments(route)
+        if occ_errors:
+            db.rollback()
+            return jsonify({"ok": False, "reason": "analysis_errors",
+                            "error": "航段占用计算存在错误，航次未改期",
+                            "errors": occ_errors}), 400
+        co_rows = occupancy_conflict_rows(db, occ_segments, self_id=voyage_id)
+        if co_rows:
+            db.rollback()
+            return reject_occupancy_conflicts("航次改期", co_rows)
+
         db.execute(
             "UPDATE voyages SET departure_time=?, route_snapshot=? WHERE id=?",
             (fmt_dt(dep), json.dumps(route, ensure_ascii=False), voyage_id),
@@ -922,6 +1122,38 @@ def end_voyage(voyage_id):
         raise
     row = db.execute("SELECT * FROM voyages WHERE id=?", (voyage_id,)).fetchone()
     return jsonify({"ok": True, "voyage": voyage_dict(row)})
+
+
+@app.get("/api/voyages/<int:voyage_id>/occupancy")
+def voyage_occupancy(voyage_id):
+    """按航次查看航段空域占用表。
+
+    始终以**该航次自己保存的航线快照**逐段计算：扫掠走廊、端点高度范围
+    [altLow, altHigh] 与进入至离开时段（时段内视为占用整段走廊）。
+    旧发布登记的航次仍按其自身快照显示，与当前发布/工作区无关。
+    已结束航次的占用已随结束释放：返回 409 voyage_ended，不提供占用表。
+    """
+    db = get_db()
+    row = db.execute("SELECT * FROM voyages WHERE id=?", (voyage_id,)).fetchone()
+    if row is None:
+        return jsonify({"ok": False, "reason": "voyage_not_found",
+                        "error": f"航次 {voyage_id} 不存在"}), 404
+    if row["ended_at"] is not None:
+        return jsonify({"ok": False, "reason": "voyage_ended",
+                        "error": f"航次 {voyage_id} 已结束，航段占用已随结束释放",
+                        "voyage": voyage_dict(row)}), 409
+    route = json.loads(row["route_snapshot"])
+    errors, segments = voyage_segments(route)
+    return jsonify({
+        "ok": True,
+        "voyageId": row["id"],
+        "releaseSeq": row["release_seq"],
+        "departureTime": row["departure_time"],
+        "createdAt": row["created_at"],
+        "open": True,
+        "errors": errors,
+        "segments": [occupancy_segment_dict(s) for s in segments if s is not None],
+    })
 
 
 # ---------------------------------------------------------------- 禁飞区变更核准
