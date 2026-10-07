@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>低空航线空域时窗审查台</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">🛫 低空航线空域时窗审查台</div>
+  <div class="modes">
+    <button class="mode active" data-mode="select">选择/拖动</button>
+    <button class="mode" data-mode="addWp">＋ 航点</button>
+    <button class="mode" data-mode="drawNfz">✎ 绘制禁飞区</button>
+  </div>
+  <div class="actions">
+    <button id="btnFit" title="缩放到全部要素">适配视图</button>
+    <button id="btnAnalyze">重新审查</button>
+    <input id="verName" type="text" placeholder="版本名称（可选）">
+    <button id="btnSaveVer">💾 保存版本</button>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="canvas-wrap">
+    <div id="modeHint" class="mode-hint"></div>
+    <svg id="board" xmlns="http://www.w3.org/2000/svg"></svg>
+    <div id="analyzeStatus" class="analyze-status"></div>
+  </section>
+
+  <aside class="panel" id="panel">
+    <div id="routeConflictBox"></div>
+    <div class="panel-section">
+      <h3>航线参数</h3>
+      <div class="form-row">
+        <label>起飞时刻</label>
+        <input type="datetime-local" id="depTime" step="60">
+      </div>
+      <div class="form-row">
+        <label>走廊半宽（km）</label>
+        <input type="number" id="corridorW" min="0.05" step="0.1">
+      </div>
+      <div class="form-row">
+        <label>画布比例（单位/km）</label>
+        <input type="number" id="unitScale" min="1" step="10">
+      </div>
+      <div id="routeSummary" class="summary"></div>
+    </div>
+
+    <div class="panel-section">
+      <h3>航点 / 航段</h3>
+      <div id="wpList" class="wp-list"></div>
+    </div>
+
+    <div class="panel-section">
+      <h3>禁飞区</h3>
+      <div id="nfzDraftBox"></div>
+      <div id="nfzList" class="nfz-list"></div>
+      <button id="btnAddNfz" class="minor">＋ 新增空禁飞区</button>
+    </div>
+
+    <div class="panel-section">
+      <h3>审查结果</h3>
+      <div id="resultBox"></div>
+    </div>
+
+    <div class="panel-section">
+      <h3>当前发布</h3>
+      <div id="releaseBox"><div class="summary">暂无发布</div></div>
+    </div>
+
+    <div class="panel-section">
+      <h3>航次登记 / 改期</h3>
+      <div id="voyageBox"></div>
+    </div>
+
+    <div class="panel-section">
+      <h3>版本</h3>
+      <div id="versionList" class="version-list"></div>
+    </div>
+  </aside>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

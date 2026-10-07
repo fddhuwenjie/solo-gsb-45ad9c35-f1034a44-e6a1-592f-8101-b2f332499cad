@@ -1,0 +1,182 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; }
+body { display: flex; flex-direction: column; background: #0e1420; color: #d7e0ee; }
+
+.topbar {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 8px 14px; background: #161f30; border-bottom: 1px solid #27344c;
+}
+.brand { font-weight: 700; font-size: 16px; white-space: nowrap; }
+.modes { display: flex; gap: 6px; }
+.mode {
+  background: #1e2a40; color: #9fb0c9; border: 1px solid #31415c;
+  padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 13px;
+}
+.mode.active { background: #2f6df6; color: #fff; border-color: #2f6df6; }
+.actions { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+.actions button, .minor {
+  background: #23304a; color: #d7e0ee; border: 1px solid #3a4a67;
+  padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 13px;
+}
+.actions button:hover, .minor:hover { border-color: #5a7bb0; }
+#verName {
+  background: #0e1726; color: #d7e0ee; border: 1px solid #31415c;
+  border-radius: 6px; padding: 6px 8px; width: 170px; font-size: 13px;
+}
+
+.layout { flex: 1; display: flex; min-height: 0; }
+.canvas-wrap { position: relative; flex: 1; min-width: 0; }
+#board { width: 100%; height: 100%; display: block; cursor: default; touch-action: none; }
+.mode-hint {
+  position: absolute; top: 10px; left: 12px; z-index: 5;
+  background: rgba(15,23,38,.82); border: 1px solid #31415c;
+  padding: 5px 10px; border-radius: 6px; font-size: 12px; color: #9fb0c9;
+  pointer-events: none;
+}
+.analyze-status {
+  position: absolute; bottom: 10px; left: 12px; z-index: 5;
+  font-size: 12px; color: #7e8ea8; pointer-events: none;
+}
+
+/* SVG */
+.grid-line { stroke: #1b2740; stroke-width: 1; }
+.route-line { fill: none; stroke: #37b6ff; stroke-width: 2.5; }
+.route-corridor { fill: rgba(55,182,255,.08); stroke: rgba(55,182,255,.35);
+  stroke-width: 1; stroke-dasharray: 5 4; }
+.wp-dot { fill: #7fd8ff; stroke: #0e1726; stroke-width: 2; cursor: grab; }
+.wp-dot.selected { fill: #ffd166; }
+.wp-dot:active { cursor: grabbing; }
+.wp-label { fill: #bcd2ee; font-size: 11px; pointer-events: none; }
+.nfz-poly { stroke-width: 1.5; cursor: pointer; }
+.nfz-poly.ok { fill: rgba(255,255,255,.05); stroke: #8fa3c2; }
+.nfz-poly.selected { stroke-width: 2.5; }
+.nfz-vertex { fill: #ffd166; stroke: #7a5a00; stroke-width: 1; cursor: grab; }
+.nfz-label { fill: #c8d6ec; font-size: 11px; pointer-events: none; }
+.conflict-overlay { fill: rgba(255,77,109,.22); stroke: #ff4d6d; stroke-width: 1.5; }
+.witness { fill: #ff4d6d; stroke: #fff; stroke-width: 1.5; }
+.witness-ring { fill: none; stroke: #ff4d6d; stroke-width: 2; }
+.witness-label { fill: #ffb3c1; font-size: 11px; pointer-events: none; }
+.draw-preview { fill: none; stroke: #ffd166; stroke-width: 1.5; stroke-dasharray: 4 3; }
+
+/* 侧栏 */
+.panel {
+  width: 360px; overflow-y: auto; background: #131c2c;
+  border-left: 1px solid #27344c; padding: 10px 12px; flex-shrink: 0;
+}
+.panel-section { border-bottom: 1px solid #23304a; padding: 10px 0; }
+.panel-section:last-child { border-bottom: none; }
+.panel-section h3 { font-size: 13px; color: #8fa6c7; margin-bottom: 8px; letter-spacing: 1px; }
+.form-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.form-row label { width: 104px; font-size: 12px; color: #9fb0c9; flex-shrink: 0; }
+.form-row input {
+  flex: 1; min-width: 0; background: #0e1726; color: #d7e0ee;
+  border: 1px solid #31415c; border-radius: 5px; padding: 4px 6px; font-size: 12px;
+}
+.summary { font-size: 12px; color: #7e8ea8; margin-top: 4px; line-height: 1.7; }
+
+.wp-card, .nfz-card {
+  background: #18233a; border: 1px solid #2a3a57; border-radius: 7px;
+  padding: 8px; margin-bottom: 8px; cursor: pointer;
+}
+.wp-card.selected, .nfz-card.selected { border-color: #ffd166; }
+.wp-card .card-head, .nfz-card .card-head {
+  display: flex; align-items: center; gap: 6px; margin-bottom: 6px;
+}
+.wp-card .card-head b, .nfz-card .card-head b { font-size: 12px; flex: 1; }
+.del-btn {
+  background: transparent; border: none; color: #ff7a90; cursor: pointer;
+  font-size: 13px; padding: 0 4px;
+}
+.seg-row {
+  display: flex; align-items: center; gap: 6px; font-size: 11px;
+  color: #8294b3; margin: 4px 0; padding: 3px 6px; background: #121b2c; border-radius: 5px;
+}
+.seg-row input {
+  width: 60px; background: #0e1726; color: #d7e0ee; border: 1px solid #31415c;
+  border-radius: 4px; padding: 2px 4px; font-size: 11px;
+}
+.seg-eta { margin-left: auto; white-space: nowrap; }
+.nfz-card .times { display: flex; gap: 4px; }
+.nfz-card .times input { flex: 1; min-width: 0; }
+input[type="checkbox"] { accent-color: #2f6df6; }
+
+.result-bad { background: rgba(255,77,109,.12); border: 1px solid #ff4d6d; border-radius: 7px; padding: 8px; }
+.result-good { background: rgba(63,203,140,.1); border: 1px solid #3fcb8c; border-radius: 7px; padding: 8px; }
+.result-first { font-size: 13px; line-height: 1.8; }
+.result-first .big { font-size: 15px; font-weight: 700; color: #ff8fa3; }
+.entry-line { font-size: 11px; color: #b9c6dd; padding: 4px 6px; margin-top: 4px;
+  background: #121b2c; border-radius: 5px; line-height: 1.6; }
+.entry-line.first { border-left: 3px solid #ff4d6d; }
+.error-line { font-size: 11px; color: #ffb36b; padding: 3px 6px; margin-top: 4px;
+  background: rgba(255,179,107,.08); border-radius: 5px; }
+.link-btn {
+  background: none; border: none; color: #6ea8ff; cursor: pointer;
+  font-size: 11px; text-decoration: underline; padding: 0;
+}
+.link-btn:hover { color: #93c0ff; }
+
+.version-item {
+  display: flex; align-items: center; gap: 6px; font-size: 12px;
+  background: #18233a; border: 1px solid #2a3a57; border-radius: 6px;
+  padding: 6px 8px; margin-bottom: 6px;
+}
+.version-item .vmeta { flex: 1; min-width: 0; }
+.version-item .vname { font-weight: 600; }
+.version-item .vtime { color: #7e8ea8; font-size: 11px; }
+.version-item button {
+  background: #23304a; color: #b9c6dd; border: 1px solid #3a4a67;
+  border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer;
+}
+.release-card {
+  background: #18233a; border: 1px solid #2a3a57; border-radius: 7px;
+  padding: 8px; font-size: 12px; margin-top: 6px;
+}
+.release-card .rel-head { font-weight: 700; font-size: 13px; color: #7fd8ff; margin-bottom: 4px; }
+
+/* 航次 */
+.voyage-item {
+  display: flex; align-items: center; gap: 6px; font-size: 12px;
+  background: #18233a; border: 1px solid #2a3a57; border-radius: 6px;
+  padding: 6px 8px; margin-bottom: 6px;
+}
+.voyage-item.open { border-left: 3px solid #3fcb8c; }
+.voyage-item .vmeta { flex: 1; min-width: 0; }
+.voyage-item .vname { font-weight: 600; }
+.voyage-item .vtime { color: #7e8ea8; font-size: 11px; }
+.voyage-open { color: #3fcb8c; font-weight: 400; font-size: 11px; }
+.voyage-ended { color: #7e8ea8; font-weight: 400; font-size: 11px; }
+
+/* 双页航线冲突 */
+.conflict-card {
+  background: rgba(255,77,109,.10); border: 1px solid #ff4d6d;
+  border-radius: 7px; padding: 9px; margin: 8px 0;
+}
+.conflict-head { font-weight: 700; font-size: 13px; color: #ff8fa3; margin-bottom: 6px; }
+.conflict-side {
+  background: #121b2c; border: 1px solid #2a3a57; border-radius: 6px;
+  padding: 6px 8px; margin-top: 6px; font-size: 12px;
+}
+.conflict-side b { color: #bcd2ee; font-size: 12px; }
+.conflict-card .draft-actions button {
+  background: #23304a; color: #d7e0ee; border: 1px solid #3a4a67;
+  border-radius: 5px; padding: 5px 10px; font-size: 12px; cursor: pointer;
+}
+.conflict-card .draft-actions button:hover { border-color: #5a7bb0; }
+
+/* 禁飞区草稿 */
+.draft-card {
+  background: rgba(255,209,102,.08); border: 1px solid #ffd166;
+  border-radius: 7px; padding: 8px; margin: 6px 0 8px;
+}
+.draft-head { font-weight: 700; font-size: 12px; color: #ffd166; margin-bottom: 4px; }
+.draft-actions { display: flex; gap: 6px; margin-top: 8px; }
+.draft-actions button {
+  background: #23304a; color: #d7e0ee; border: 1px solid #3a4a67;
+  border-radius: 5px; padding: 4px 10px; font-size: 12px; cursor: pointer;
+}
+.draft-actions button:hover { border-color: #5a7bb0; }
+.toast {
+  position: fixed; top: 56px; left: 50%; transform: translateX(-50%);
+  background: #1e2a40; border: 1px solid #3f557c; color: #d7e0ee;
+  padding: 8px 16px; border-radius: 6px; font-size: 13px; z-index: 99;
+}

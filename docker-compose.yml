@@ -1,0 +1,13 @@
+services:
+  airspace-console:
+    build: .
+    image: low-altitude-airspace-console:latest
+    container_name: airspace-console
+    ports:
+      - "8000:8000"
+    volumes:
+      - airspace-data:/data
+    restart: unless-stopped
+
+volumes:
+  airspace-data:
