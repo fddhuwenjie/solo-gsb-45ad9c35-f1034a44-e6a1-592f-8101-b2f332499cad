@@ -146,6 +146,33 @@ input[type="checkbox"] { accent-color: #2f6df6; }
 .voyage-open { color: #3fcb8c; font-weight: 400; font-size: 11px; }
 .voyage-ended { color: #7e8ea8; font-weight: 400; font-size: 11px; }
 
+/* 航段空域占用 */
+.occupancy-corridor {
+  fill: rgba(255,159,67,.16); stroke: #ff9f43; stroke-width: 1.5;
+  stroke-dasharray: 6 4; pointer-events: none;
+}
+.occupancy-corridor-hole {
+  fill: #0e1420; stroke: #ff9f43; stroke-width: 1;
+  stroke-dasharray: 4 3; pointer-events: none;
+}
+.occupancy-center {
+  fill: none; stroke: #ff9f43; stroke-width: 2;
+  stroke-linecap: round; pointer-events: none;
+}
+.occupancy-label { fill: #ffcf9e; font-size: 11px; pointer-events: none; }
+.occupancy-card {
+  background: rgba(255,159,67,.07); border: 1px solid #b26a22;
+  border-radius: 7px; padding: 8px; margin: 0 0 8px;
+}
+.occupancy-card .occ-head { font-size: 12px; font-weight: 700; color: #ffb36b; line-height: 1.7; }
+.occ-seg {
+  background: #121b2c; border: 1px solid #2a3a57; border-radius: 6px;
+  padding: 5px 8px; margin-top: 6px; font-size: 11px; color: #b9c6dd; line-height: 1.7;
+}
+.occ-seg-head b { color: #ffcf9e; }
+.occ-seg-time { color: #ffcf9e; }
+.co-line { border-left: 3px solid #ff9f43; }
+
 /* 双页航线冲突 */
 .conflict-card {
   background: rgba(255,77,109,.10); border: 1px solid #ff4d6d;

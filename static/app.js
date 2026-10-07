@@ -21,6 +21,12 @@ let voyages = [];          // 航次列表（GET /api/voyages，新登记在前�
 // 用户录入后保留其值，发布号变化才重新预填
 let voyageDepSeq = null;
 let voyageDepDraft = "";
+// 航次占用（侧栏按航次查看）：
+// occupancyViews = { [voyageId]: {loading, data, err} }；展开某航次时按其
+// 自身保存的航线快照拉取航段空域占用表，并在画布叠加该航次的扫掠走廊。
+// 航次列表每次刷新后，被改期的航次缓存作废（几何不变、时刻变了）。
+let occupancyViews = {};
+let occupancyOpenId = null;
 // 航次改期：选中的未结束航次与所见原时刻（乐观并发基线）、新时刻输入草稿、
 // 最近一次被拒的原因与明细。被拒时输入保留，可修改后重新提交
 let rescheduleTarget = null; // {id, originalDepartureTime}
@@ -537,6 +543,9 @@ function renderBoard() {
       }
     }
   }
+
+  // 选中查看的未结束航次：按其自身航线快照叠加扫掠走廊（占用整段走廊）
+  if (occupancyOpenId != null) renderOccupancyOverlay();
 
   // 航线扫掠走廊（半宽描边近似缓冲区）
   if (wps.length >= 2) {
@@ -1335,9 +1344,40 @@ async function loadVoyages() {
     r = null;
   }
   if (r && r.ok) {
+    const prev = new Map(voyages.map((v) => [v.id, v]));
     voyages = r.voyages || [];
+    // 航次时刻被改期/结束后作废占用缓存（几何快照不变、占用时段变了）；
+    // 已不存在的航次收起其占用面板
+    const staleOpen = [];
+    for (const v of voyages) {
+      const old = prev.get(v.id);
+      if (old && (old.departureTime !== v.departureTime || old.endedAt !== v.endedAt)) {
+        delete occupancyViews[v.id];
+        if (occupancyOpenId === v.id) staleOpen.push(v.id); // 面板仍展开：重新拉取
+      }
+    }
+    const ids = new Set(voyages.map((v) => v.id));
+    for (const id of Object.keys(occupancyViews)) {
+      if (!ids.has(Number(id))) delete occupancyViews[Number(id)];
+    }
+    if (occupancyOpenId != null && !ids.has(occupancyOpenId)) occupancyOpenId = null;
+    for (const id of staleOpen) void openOccupancy(id);
   }
   renderVoyages();
+}
+
+// 共占拒绝明细：逐条列出对方航次编号、双方航段、高度重合与正长度重叠时段
+function coOccupancyHtml(err) {
+  const list = err.coOccupancy || [];
+  if (!list.length) return "";
+  let html = `<div class="error-line">⚠ 共 ${list.length} 处航段共占（走廊相交 ∩ 高度重合 ∩ 时段正长度重叠；首尾相接允许）：</div>`;
+  for (const co of list) {
+    html += `<div class="entry-line co-line">✈ 与航次 #${co.voyageId}（发布 #${co.releaseSeq}，起飞 ${fmtTime(co.departureTime)}）·
+      本航段 ${co.segIndex + 1} / 对方航段 ${co.otherSegIndex + 1} ·
+      重叠 ${fmtTime(co.startTime)}→${fmtTime(co.endTime)}（${co.durationMinutes ?? 0} 分钟）·
+      高度 ${co.altLow}–${co.altHigh}m</div>`;
+  }
+  return html;
 }
 
 function renderVoyageRegister(err) {
@@ -1349,6 +1389,7 @@ function renderVoyageRegister(err) {
     for (const e of err.errors || []) {
       html += `<div class="error-line">⚠ ${esc(e.message)}</div>`;
     }
+    html += coOccupancyHtml(err);
     for (const e of err.entries || []) {
       html += `<div class="entry-line">✈ ${esc(e.nfzName)} · 航段${e.segIndex + 1} ·
         ${fmtTime(e.enterTime)}→${fmtTime(e.exitTime)} · 高度 ${e.altLow}–${e.altHigh}m</div>`;
@@ -1402,16 +1443,18 @@ function renderVoyageList() {
     const status = v.open
       ? `<span class="voyage-open">执行中</span>`
       : `<span class="voyage-ended">已结束 ${esc(v.endedAt)}</span>`;
-    const btn = v.open
+    const acts = v.open
       ? ` <button data-act="resched" data-id="${v.id}" class="minor" style="padding:2px 8px;font-size:11px">改期</button>` +
-        ` <button data-act="end" data-id="${v.id}" class="minor" style="padding:2px 8px;font-size:11px">结束航次</button>`
-      : "";
+        ` <button data-act="end" data-id="${v.id}" class="minor" style="padding:2px 8px;font-size:11px">结束航次</button>` +
+        ` <button data-act="occup" data-id="${v.id}" class="minor" style="padding:2px 8px;font-size:11px">${occupancyOpenId === v.id ? "收起占用" : "空域占用"}</button>`
+      : ` <button data-act="occup" data-id="${v.id}" class="minor" style="padding:2px 8px;font-size:11px">${occupancyOpenId === v.id ? "收起占用" : "历史占用"}</button>`;
     return `<div class="voyage-item${v.open ? " open" : ""}">
       <div class="vmeta">
         <div class="vname">航次 #${v.id} ｜ 发布 #${v.releaseSeq} ${status}</div>
-        <div class="vtime">起飞 ${fmtTime(v.departureTime)} ｜ 登记于 ${esc(v.createdAt)}</div>
-      </div>${btn}
-    </div>`;
+        <div class="vtime">起飞 ${fmtTime(v.departureTime)} ｜ 登记于 ${esc(v.createdAt)}${v.open ? "" : " ｜ 占用已随结束释放"}</div>
+      </div>${acts}
+    </div>
+    <div class="occupancy-slot" data-slot="${v.id}"></div>`;
   }).join("");
   box.querySelectorAll("[data-act='end']").forEach((b) => {
     b.onclick = () => endVoyage(+b.dataset.id);
@@ -1419,6 +1462,127 @@ function renderVoyageList() {
   box.querySelectorAll("[data-act='resched']").forEach((b) => {
     b.onclick = () => startReschedule(+b.dataset.id);
   });
+  box.querySelectorAll("[data-act='occup']").forEach((b) => {
+    b.onclick = () => toggleOccupancy(+b.dataset.id);
+  });
+  for (const v of voyages) {
+    const slot = box.querySelector(`[data-slot='${v.id}']`);
+    if (slot) renderOccupancySlot(slot, v);
+  }
+}
+
+// ----------------------------------------------------------- 航段空域占用
+// 展开/收起某航次的占用表；首次展开时按其自身保存的航线快照向服务端拉取。
+// 未结束航次的占用仍生效；已结束航次可查看历史占用表，但标注已释放。
+function toggleOccupancy(id) {
+  if (occupancyOpenId === id) {
+    occupancyOpenId = null;
+  } else {
+    occupancyOpenId = id;
+    if (!occupancyViews[id]) void openOccupancy(id);
+  }
+  renderVoyageList();
+  renderBoard();
+}
+
+async function openOccupancy(id) {
+  occupancyViews[id] = { loading: true, data: null, err: null };
+  renderVoyageList();
+  let r;
+  try {
+    r = await api(`/api/voyages/${id}/occupancy`);
+  } catch (e) {
+    occupancyViews[id] = { loading: false, data: null, err: "占用查询失败：" + e };
+    renderVoyageList();
+    return;
+  }
+  if (!r || !r.ok) {
+    occupancyViews[id] = { loading: false, data: null, err: (r && r.error) || "占用查询失败" };
+  } else {
+    occupancyViews[id] = { loading: false, data: r.occupancy, err: null };
+  }
+  renderVoyageList();
+  renderBoard();
+}
+
+function renderOccupancySlot(slot, v) {
+  if (occupancyOpenId !== v.id) { slot.innerHTML = ""; return; }
+  const view = occupancyViews[v.id];
+  if (!view) { slot.innerHTML = ""; return; }
+  if (view.loading) {
+    slot.innerHTML = `<div class="occupancy-card"><div class="summary">占用表加载中…</div></div>`;
+    return;
+  }
+  if (view.err) {
+    slot.innerHTML = `<div class="occupancy-card">
+      <div class="error-line">⚠ ${esc(view.err)}</div>
+      <div class="draft-actions"><button data-retry class="minor">重试</button></div>
+    </div>`;
+    const btn = slot.querySelector("[data-retry]");
+    if (btn) btn.onclick = () => openOccupancy(v.id);
+    return;
+  }
+  const occ = view.data;
+  if (!occ) { slot.innerHTML = ""; return; }
+  let html = `<div class="occupancy-card">
+    <div class="occ-head">航次 #${occ.voyageId} 航段空域占用表
+      ｜ 发布 #${occ.releaseSeq} ｜ 起飞 ${fmtTime(occ.departureTime)}
+      ${occ.open ? '<span class="voyage-open">（占用生效中）</span>'
+                 : '<span class="voyage-ended">（已结束，占用已释放；下表为历史快照）</span>'}</div>`;
+  for (const er of occ.errors || []) {
+    html += `<div class="error-line">⚠ ${esc(er.message)}</div>`;
+  }
+  if (!occ.segments.length) {
+    html += `<div class="summary">该航次快照没有非零长度航段。</div>`;
+  } else {
+    html += `<div class="summary">进入至离开该段时段内，视为占用整段扫掠走廊。</div>`;
+    for (const s of occ.segments) {
+      html += `<div class="occ-seg">
+        <div class="occ-seg-head">航段 ${s.segIndex + 1} ｜ 航程 ${s.distanceKm} km
+          ｜ 端点高度 ${s.altLow}–${s.altHigh} m</div>
+        <div class="occ-seg-time">占用 ${fmtTime(s.enterTime)} → ${fmtTime(s.exitTime)}
+          （${s.durationMinutes ?? "—"} 分钟）</div>
+      </div>`;
+    }
+  }
+  html += `</div>`;
+  slot.innerHTML = html;
+}
+
+// 画布叠加：所选航次各段的扫掠走廊（GeoJSON 多边形）、中心线与航段编号
+function renderOccupancyOverlay() {
+  const view = occupancyViews[occupancyOpenId];
+  const data = view && view.data;
+  const voyage = voyages.find((x) => x.id === occupancyOpenId);
+  if (!data || !voyage) return;
+  const wps = (voyage.routeSnapshot && voyage.routeSnapshot.waypoints) || [];
+
+  const ringPoints = (ring) => ring.map(([x, y]) => `${r2(x)},${r2(y)}`).join(" ");
+  const drawPolygon = (coords) => {
+    el("polygon", { points: ringPoints(coords[0]), class: "occupancy-corridor" }, svg);
+    for (const hole of coords.slice(1)) {
+      el("polygon", { points: ringPoints(hole), class: "occupancy-corridor-hole" }, svg);
+    }
+  };
+  for (const s of data.segments) {
+    const gj = s.corridor;
+    if (!gj) continue;
+    if (gj.type === "Polygon") drawPolygon(gj.coordinates);
+    else if (gj.type === "MultiPolygon") {
+      for (const poly of gj.coordinates) drawPolygon(poly);
+    }
+  }
+  for (const s of data.segments) {
+    const a = wps[s.segIndex], b = wps[s.segIndex + 1];
+    if (!a || !b) continue;
+    const x0 = num(a.x), y0 = num(a.y), x1 = num(b.x), y1 = num(b.y);
+    el("line", { x1: r2(x0), y1: r2(y0), x2: r2(x1), y2: r2(y1), class: "occupancy-center" }, svg);
+    el("text", {
+      x: r2((x0 + x1) / 2), y: r2((y0 + y1) / 2 - 8 * screenScale()),
+      class: "occupancy-label", "text-anchor": "middle",
+      text: `#${voyage.id} 段${s.segIndex + 1} ${fmtTime(s.enterTime)}→${fmtTime(s.exitTime)}`,
+    }, svg);
+  }
 }
 
 // 航次改期表单：选中未结束航次后展示；新时刻输入草稿与被拒明细都保留在页面
@@ -1437,6 +1601,7 @@ function renderVoyageReschedule() {
       html += `<div class="entry-line">✈ ${esc(e.nfzName)} · 航段${e.segIndex + 1} ·
         ${fmtTime(e.enterTime)}→${fmtTime(e.exitTime)} · 高度 ${e.altLow}–${e.altHigh}m</div>`;
     }
+    html += coOccupancyHtml(rescheduleErr);
     if (rescheduleErr.details) {
       for (const [, val] of Object.entries(rescheduleErr.details)) {
         html += `<div class="entry-line">原时刻：提交时 ${fmtTime(val.expected)} → 当前 ${fmtTime(val.actual)}</div>`;
